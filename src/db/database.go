@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	//_ "github.com/mattn/go-sqlite3"
 	"github.com/redis/go-redis/v9"
 	_ "github.com/tursodatabase/go-libsql"
@@ -25,13 +24,14 @@ type database struct {
 func New() *database {
 	dbName := os.Getenv("DB_URL")
 	driverName := os.Getenv("DRIVER")
-	fmt.Println(dbName)
 	redisURL := os.Getenv("REDIS_URL")
-	slog.Info("Connecting to database:", dbName)
+	// The connection string is not logged: it carries credentials on any
+	// driver other than SQLite. Only the driver name is safe to print.
+	slog.Info("connecting to database", "driver", driverName)
 	db, dbconErr := sql.Open(driverName, dbName)
 	if dbconErr != nil {
-		slog.Error("error Connecting to database:", dbName)
-		panic(dbconErr.Error() + dbName)
+		slog.Error("could not open database", "driver", driverName, "error", dbconErr.Error())
+		panic("could not open database: " + dbconErr.Error())
 	}
 	pingErr := db.Ping()
 	//db.SetMaxOpenConns(1)

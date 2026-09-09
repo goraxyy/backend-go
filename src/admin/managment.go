@@ -104,12 +104,20 @@ type AddNewMachinesRequest struct {
 }
 
 func AddNewMachines(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
 	var body AddNewMachinesRequest
 	decodeErr := json.NewDecoder(r.Body).Decode(&body)
 	if decodeErr != nil {
 		http.Error(w, "Error With passed parameters please check the documentation or check support", http.StatusBadRequest)
+		return
 	}
-	addMachinesToBuilding(body.Buildings, body.ClientName)
+	if machinesErr := addMachinesToBuilding(body.Buildings, body.ClientName); machinesErr != nil {
+		http.Error(w, "Could not add machines", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	var response AssignBoardResponse

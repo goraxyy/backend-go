@@ -7,8 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"strconv"
+	"strings"
 )
 
 func FileRoute(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +31,7 @@ func FileRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length",strconv.Itoa(len(dat)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(dat)))
 	_, writeErr := w.Write(dat)
 	if writeErr != nil {
 		w.Header().Set("Content-Type", "application/json")
