@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+Bruno
+loadtesting
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+src/spacesona-go-backend

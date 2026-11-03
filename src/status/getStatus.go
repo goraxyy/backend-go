@@ -9,18 +9,82 @@ import (
 	"spacesona-go-backend/db"
 	"spacesona-go-backend/helpers"
 	"spacesona-go-backend/logging"
+	"strings"
 	"time"
 )
 
 type GetStatusResponse struct {
-	Statuses map[int]helpers.DBMachine
+	Statuses map[int]publicMachine
+}
+
+// publicMachine is what /status/... returns to anonymous callers.
+//
+// It deliberately omits mac_address. This endpoint is unauthenticated and is
+// polled by the student web app, so it was publishing the MAC of every board
+// in the fleet -- and a MAC address was the only thing /auth/device required
+// to mint a 24-hour token. Field names and types otherwise match DBMachine so
+// existing clients keep working unchanged.
+type publicMachine struct {
+	Id                int            `json:"id"`
+	Number            int            `json:"number"`
+	Type              sql.NullString `json:"type"`
+	Status            bool           `json:"status"`
+	Building          sql.NullString `json:"building"`
+	ClientName        sql.NullString `json:"client_name"`
+	EstimatedDuration int            `json:"estimated_duration"`
+	NumberOfRuns      int            `json:"number_of_runs"`
+}
+
+func toPublicMachine(m helpers.DBMachine) publicMachine {
+	return publicMachine{
+		Id:                m.Id,
+		Number:            m.Number,
+		Type:              m.Type,
+		Status:            m.Status,
+		Building:          m.Building,
+		ClientName:        m.ClientName,
+		EstimatedDuration: m.EstimatedDuration,
+		NumberOfRuns:      m.NumberOfRuns,
+	}
+}
+
+// statusPathSegments resolves the query scope from the request path.
+//
+// Go's ServeMux wildcards match a single non-empty segment, and a pattern that
+// does not end in "/" will not match a path that does. So "/status/lafTest/"
+// misses "/status/{client}" and falls through to the bare "/status/" subtree
+// route, where PathValue("client") is "" and every filter widens to "*".
+//
+// The student app requests exactly that URL, so a request that looks scoped to
+// one customer was silently returning every customer's machines. Deriving the
+// segments from the path directly makes the trailing slash irrelevant.
+func statusPathSegments(r *http.Request) (client, building, machineType, macAddress string) {
+	// PathValue still wins when the mux populated it.
+	client = r.PathValue("client")
+	building = r.PathValue("building")
+	machineType = r.PathValue("type")
+	macAddress = r.PathValue("machineId")
+
+	if client != "" {
+		return client, building, machineType, macAddress
+	}
+
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/status"), "/")
+	if rest == "" {
+		return "", "", "", ""
+	}
+	segments := strings.Split(rest, "/")
+	get := func(i int) string {
+		if i < len(segments) {
+			return segments[i]
+		}
+		return ""
+	}
+	return get(0), get(1), get(2), get(3)
 }
 
 func GetStatusRoute(w http.ResponseWriter, r *http.Request) {
-	clientName := r.PathValue("client")
-	buildingName := r.PathValue("building")
-	machineType := r.PathValue("type")
-	macAddress := r.PathValue("macAddress")
+	clientName, buildingName, machineType, macAddress := statusPathSegments(r)
 	start := time.Now()
 	defer func() {
 		logging.GetStatusDuration.Observe(time.Since(start).Seconds())
@@ -40,14 +104,17 @@ func GetStatusRoute(w http.ResponseWriter, r *http.Request) {
 		macAddress = "*"
 	}
 	//TODO this could be slow and may need optimisation in the future but on the upside no db reads
-	rdsScanQuery := fmt.Sprintf("client:%s:building:%s:type:%s:machine:%s", clientName, buildingName, machineType, machineType)
+	// The last argument was machineType, not macAddress -- the computed
+	// macAddress was never used. Both sides now go through CacheKey so the
+	// write and read formats cannot drift apart again.
+	rdsScanQuery := CacheKey(clientName, buildingName, machineType, macAddress)
 	machines, _, rdsErr := rds.Scan(ctx, 0, rdsScanQuery, 100).Result()
 	if rdsErr != nil {
 		slog.Error(rdsErr.Error())
 		return
 	}
 	//todo Also could be slow depending on the query but for now its like only ~150 machines so its fine :)
-	machinesFromeCache := make(map[int]helpers.DBMachine)
+	machinesFromeCache := make(map[int]publicMachine)
 	for _, machine := range machines {
 		result, GetValueErr := rds.Get(ctx, machine).Result()
 		if GetValueErr != nil {
@@ -58,7 +125,7 @@ func GetStatusRoute(w http.ResponseWriter, r *http.Request) {
 		if decodeErr != nil {
 			slog.Error(decodeErr.Error())
 		}
-		machinesFromeCache[decoded.Id] = decoded
+		machinesFromeCache[decoded.Id] = toPublicMachine(decoded)
 	}
 	getStatusResponse := GetStatusResponse{machinesFromeCache}
 	responseString, jsonEncodeErr := json.Marshal(getStatusResponse)

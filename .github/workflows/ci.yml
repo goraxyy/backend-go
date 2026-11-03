@@ -1,0 +1,31 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+
+      - name: Vet
+        working-directory: src
+        run: go vet ./...
+
+      - name: Build
+        working-directory: src
+        run: go build ./...
+
+      # The Dockerfile once referenced a file missing from the repo, so
+      # `docker build` failed on every fresh clone and nobody noticed.
+      - name: Docker image builds
+        run: docker build -t spaceona-backend:ci .

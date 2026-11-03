@@ -54,20 +54,19 @@ func BoardOnboardingRoute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not onboard device", http.StatusBadRequest)
 		return
 	}
-	clientCheck, clientErr := auth.EncryptString(client.Key.String, client.Salt)
-	if clientErr != nil {
-		slog.Error("encrypt client err", "error", clientErr.Error())
+	keyMatches, compareErr := auth.SecureCompareKey(client.Key.String, body.ClientKey, client.Salt)
+	if compareErr != nil {
+		slog.Error("client key comparison failed", "error", compareErr.Error())
 		http.Error(w, "could not onboard device", http.StatusBadRequest)
 		return
 	}
-	dbCheck, dbErr := auth.EncryptString(body.ClientKey, client.Salt)
-	if dbErr != nil {
-		slog.Error("encrypt db err", "error", dbErr.Error())
+	// The missing return here was the whole bug: the handler wrote a 400 and
+	// then fell straight through to the INSERT below, so any MAC address could
+	// be registered as a valid board using any key, or none.
+	if !keyMatches {
+		slog.Warn("onboarding attempt with wrong client key", "client", body.ClientName)
 		http.Error(w, "could not onboard device", http.StatusBadRequest)
 		return
-	}
-	if clientCheck != dbCheck {
-		http.Error(w, "could not onboard device", http.StatusBadRequest)
 	}
 	newBoardSqlString := "INSERT INTO board (mac_address, valid, client_name)  VALUES (?,?,?);"
 	_, execErr := db.UseSQL().Exec(newBoardSqlString, body.MacAddress, 1, client.Name)
@@ -127,6 +126,7 @@ func ClientOnboardingRoute(w http.ResponseWriter, r *http.Request) {
 	if decodeErr != nil {
 		slog.Error(decodeErr.Error())
 		http.Error(w, "Error With passed parameters please check the documentation or check support", http.StatusBadRequest)
+		return
 	}
 	key, salt, keyGenErr := auth.GenKey()
 	if keyGenErr != nil {
@@ -141,7 +141,10 @@ func ClientOnboardingRoute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error creating client contact support", http.StatusBadRequest)
 		return
 	}
-	addMachinesToBuilding(body.Buildings, body.ClientName)
+	if machinesErr := addMachinesToBuilding(body.Buildings, body.ClientName); machinesErr != nil {
+		http.Error(w, "Error creating client contact support", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	var response newClientResponse
@@ -157,26 +160,42 @@ func ClientOnboardingRoute(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func addMachinesToBuilding(buildings []helpers.Building, clientName string) {
+func addMachinesToBuilding(buildings []helpers.Building, clientName string) error {
 	for _, building := range buildings {
 		newBuildingString := "INSERT OR IGNORE INTO building (name, client_name) VALUES (?,?);"
-		_, sqlInsertBuildingErr := db.UseSQL().Exec(newBuildingString, building.BuildingName)
+		// This previously passed one argument for two placeholders, so the
+		// building insert always failed -- and the error was only logged.
+		_, sqlInsertBuildingErr := db.UseSQL().Exec(newBuildingString, building.BuildingName, clientName)
 		if sqlInsertBuildingErr != nil {
-			slog.Error("failed to add building with error", "error", sqlInsertBuildingErr.Error())
+			slog.Error("failed to add building", "error", sqlInsertBuildingErr.Error())
+			return fmt.Errorf("adding building %q: %w", building.BuildingName, sqlInsertBuildingErr)
 		}
-		//todo figure out how to do a mass insert
+
+		if len(building.Machines) == 0 {
+			continue
+		}
+
+		// Values are bound as parameters rather than formatted into the
+		// statement. The previous version interpolated the client name,
+		// building name and machine type directly with %s, which let any
+		// caller of /onboard/client or /admin/machine/new inject SQL.
 		var sb strings.Builder
-		sb.WriteString("INSERT INTO machine (number,client_name,mac_address,building_name,type,status) VALUES")
+		sb.WriteString("INSERT INTO machine (number,client_name,mac_address,building_name,type,status) VALUES ")
+		args := make([]interface{}, 0, len(building.Machines)*5)
 		for i, machine := range building.Machines {
-			if i != len(building.Machines)-1 {
-				sb.WriteString(fmt.Sprintf("(%d,'%s',NUll,'%s','%s',0),", machine.Number, clientName, building.BuildingName, machine.Type))
-			} else {
-				sb.WriteString(fmt.Sprintf("(%d,'%s',NULL,'%s','%s',0);", machine.Number, clientName, building.BuildingName, machine.Type))
+			if i > 0 {
+				sb.WriteString(",")
 			}
+			sb.WriteString("(?,?,NULL,?,?,0)")
+			args = append(args, machine.Number, clientName, building.BuildingName, machine.Type)
 		}
-		_, sqlInsertMachineErr := db.UseSQL().Exec(sb.String())
+		sb.WriteString(";")
+
+		_, sqlInsertMachineErr := db.UseSQL().Exec(sb.String(), args...)
 		if sqlInsertMachineErr != nil {
-			slog.Error("failed to add machine with error", "error", sqlInsertMachineErr.Error())
+			slog.Error("failed to add machines", "error", sqlInsertMachineErr.Error())
+			return fmt.Errorf("adding machines to %q: %w", building.BuildingName, sqlInsertMachineErr)
 		}
 	}
+	return nil
 }

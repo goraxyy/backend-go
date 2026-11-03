@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"spacesona-go-backend/auth"
 	"spacesona-go-backend/db"
 	"spacesona-go-backend/helpers"
 	"spacesona-go-backend/logging"
@@ -14,6 +15,8 @@ import (
 )
 
 type UpdateStatusRequest struct {
+	// MacAddress is accepted for wire compatibility with deployed firmware but
+	// is NOT trusted. The board being written to is taken from the token.
 	MacAddress        string `json:"mac_address"`
 	FirmwareVersion   string `json:"firmwareVersion"`
 	Status            bool   `json:"Status"`
@@ -30,8 +33,19 @@ func UpdateStatusRoute(w http.ResponseWriter, r *http.Request) {
 		logging.UpdateStatusDuration.Observe(time.Since(start).Seconds())
 	}()
 	if r.Method != "POST" {
+		http.NotFound(w, r)
 		return
 	}
+
+	// The MAC in the body used to select which machine got written. Any board
+	// holding any valid token could therefore write every other board's
+	// status. Identity now comes from the verified token instead.
+	device, hasDevice := auth.DeviceFromContext(r.Context())
+	if !hasDevice {
+		http.Error(w, "not authenticated", http.StatusUnauthorized)
+		return
+	}
+
 	var body UpdateStatusRequest
 	decodeErr := json.NewDecoder(r.Body).Decode(&body)
 	if decodeErr != nil {
@@ -39,6 +53,14 @@ func UpdateStatusRoute(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cant decode request", http.StatusBadRequest)
 		return
 	}
+	if body.MacAddress != "" && body.MacAddress != device.MacAddress {
+		slog.Warn("board tried to write another board's status",
+			"token mac", device.MacAddress, "body mac", body.MacAddress)
+		http.Error(w, "mac address does not match credentials", http.StatusForbidden)
+		return
+	}
+	body.MacAddress = device.MacAddress
+
 	slog.Info("got request from board", "mac address", body.MacAddress, "firmware version", body.FirmwareVersion)
 	if body.StatusChanged == true {
 		updateErr := updateStatus(body)
@@ -85,7 +107,7 @@ func refreshCache(request UpdateStatusRequest) error {
 	defer func(row *sql.Rows) {
 		rowCloseErr := row.Close()
 		if rowCloseErr != nil {
-			slog.Error("failed to close row", rowCloseErr.Error())
+			slog.Error("failed to close row", "error", rowCloseErr.Error())
 		}
 	}(row)
 	var machineForCache helpers.DBMachine
@@ -98,11 +120,32 @@ func refreshCache(request UpdateStatusRequest) error {
 	return updateCache(machineForCache)
 }
 
+// CacheKey builds the Redis key for a machine.
+//
+// The fields are sql.NullString, which has no String() method, so the previous
+// "%s" formatting wrote the Go struct literal into the key:
+//
+//	client:{Lafayette true}:building:{Watson true}:type:{Washer true}:machine:{... true}
+//
+// The read path builds its pattern from plain path values, so it never matched
+// and every filtered status query came back empty. Only the all-wildcard query
+// worked, which is why the app appeared functional.
+func CacheKey(clientName, building, machineType, macAddress string) string {
+	return fmt.Sprintf("client:%s:building:%s:type:%s:machine:%s",
+		clientName, building, machineType, macAddress)
+}
+
 func updateCache(machineForCache helpers.DBMachine) error {
 	rds, ctx := db.UseRedis()
-	_, redisErr := rds.Set(ctx, fmt.Sprintf("client:%s:building:%s:type:%s:machine:%s", machineForCache.ClientName, machineForCache.Building, machineForCache.Type, machineForCache.MacAddress), machineForCache, time.Minute*30).Result()
+	key := CacheKey(
+		machineForCache.ClientName.String,
+		machineForCache.Building.String,
+		machineForCache.Type.String,
+		machineForCache.MacAddress.String,
+	)
+	_, redisErr := rds.Set(ctx, key, machineForCache, time.Minute*30).Result()
 	if redisErr != nil {
-		slog.Error(redisErr.Error())
+		slog.Error("failed to write cache entry", "key", key, "error", redisErr.Error())
 	}
 	return redisErr
 }
@@ -132,11 +175,11 @@ func updateStatus(request UpdateStatusRequest) error {
 		rowCloseErr := row.Close()
 		addToHistory(request, machineForCache.Id)
 		if rowCloseErr != nil {
-			slog.Error("failed to close row", rowCloseErr.Error())
+			slog.Error("failed to close row", "error", rowCloseErr.Error())
 		}
 	}(request)
-	slog.Info("sql duration row scan", time.Since(rowScanStart).Milliseconds())
-	slog.Info("sql duration", time.Since(sqlStart).Milliseconds())
+	slog.Info("sql duration", "row scan ms", time.Since(rowScanStart).Milliseconds(),
+		"total ms", time.Since(sqlStart).Milliseconds())
 	machineForCache.Status = request.Status
 	machineForCache.EstimatedDuration = request.TimeBetweenChange
 	return updateCache(machineForCache)
