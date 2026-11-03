@@ -5,7 +5,9 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./firmware:/usr/src/app/firmware
+      - ./firmware:/app/firmware:ro
+      # DB_URL must point inside this directory: file:/app/data/database.db
+      - db-data:/app/data
     env_file:
       - ./.env # Specify the path to your environment file relative to the docker-compose.yml file
     restart: always
@@ -39,6 +41,11 @@ services:
   redis:
     image: redis:6.2-alpine
     restart: always
+    # Bound to localhost only, so local tools can still inspect the cache
+    # without exposing an unauthenticated Redis to the network.
     ports:
-      - '6379:6379'
+      - '127.0.0.1:6379:6379'
     command: redis-server --save 20 1 --loglevel warning
+
+volumes:
+  db-data:

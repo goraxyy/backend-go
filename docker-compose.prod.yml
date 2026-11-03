@@ -5,8 +5,13 @@ services:
     ports:
       - "3001:3001"
     volumes:
-      - ./firmware:/usr/src/app/firmware
-      #      - ${PWD}/database.db:/app/database.db
+      # The app reads firmware from /app/firmware; the old /usr/src/app path
+      # was never read, so new .bin files only appeared after a rebuild.
+      - ./firmware:/app/firmware:ro
+      # The database must live on a volume. start-prod.sh rebuilds the
+      # container on every start, and anything inside the container is lost.
+      # DB_URL must point inside this directory: file:/app/data/database.db
+      - db-data:/app/data
       - ./.env:/app/.env
     env_file:
       - ./.env # Specify the path to your environment file relative to the docker-compose.yml file
@@ -16,6 +21,10 @@ services:
   redis:
     image: redis:6.2-alpine
     restart: always
-    ports:
-      - '6379:6379'
+    # No published port: the app reaches Redis on the compose network as
+    # redis:6379. Publishing 6379 exposed an unauthenticated Redis to anyone
+    # who could reach the host.
     command: redis-server --save 20 1 --loglevel warning
+
+volumes:
+  db-data:
